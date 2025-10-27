@@ -1,0 +1,34 @@
+{  # global options
+  email {$EMAIL}
+}
+
+{$DOMAIN} {
+  encode zstd gzip
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+  }
+
+  # API & Socket.IO → server:3000 (Caddy tự xử lý WebSocket)
+  @api path /socket.io* /api* /metrics*
+  handle @api {
+    reverse_proxy server:3000 {
+      transport http {
+        keepalive 5s
+      }
+      header_up Host {host}
+      header_up X-Forwarded-For {remote}
+      header_up X-Forwarded-Proto {scheme}
+    }
+  }
+
+  # Mặc định: web tĩnh → web:80
+  handle {
+    reverse_proxy web:80
+  }
+
+  @ingest path /ingest/*
+  handle @ingest {
+    reverse_proxy host.docker.internal:3100
+  }
+}

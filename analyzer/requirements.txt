@@ -1,0 +1,5 @@
+aiortc==1.9.0
+python-socketio==5.11.2
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+aiohttp==3.8.6

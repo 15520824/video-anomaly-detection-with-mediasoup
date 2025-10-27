@@ -1,0 +1,103 @@
+services:
+  server:
+    build: ./server
+    container_name: mediasoup-server
+    env_file: .env
+    ports:
+      - "3000:3000"
+      - "3100:3100" # ingest HTTP
+    networks:
+      - rtcnet
+    depends_on:
+      - turn
+    restart: unless-stopped
+
+  turn:
+    image: instrumentisto/coturn:latest
+    container_name: coturn
+    command: >-
+      -n --log-file=stdout
+      --min-port=49160 --max-port=49200
+      --realm=$${TURN_REALM}
+      --use-auth-secret --static-auth-secret=$${TURN_SECRET}
+      --no-cli --no-tcp-relay
+      --listening-port=3478 --tls-listening-port=5349
+      --external-ip=$${PUBLIC_IP}
+    environment:
+      - TURN_REALM=${TURN_REALM}
+      - TURN_SECRET=${TURN_SECRET}
+      - PUBLIC_IP=${PUBLIC_IP}
+    network_mode: host
+    restart: unless-stopped
+
+  rtsp-publisher:
+    build: ./rtsp-publisher
+    container_name: rtsp-publisher
+    env_file: .env
+    networks:
+      - rtcnet
+    depends_on:
+      - server
+      - mediamtx
+    restart: unless-stopped
+
+  analyzer:
+    build: ./analyzer
+    container_name: ai-analyzer
+    env_file: .env
+    networks:
+      - rtcnet
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  web:
+    image: nginx:alpine
+    container_name: web
+    volumes:
+      - ./web/dist:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    networks:
+      - rtcnet
+    depends_on:
+      - server
+
+  caddy:
+    image: caddy:2.8
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - EMAIL=${EMAIL}
+    volumes:
+      - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web/dist:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - rtcnet
+    depends_on:
+      - server
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: unless-stopped
+    ports:
+      - "8554:8554" # RTSP
+    networks:
+      - rtcnet
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+networks:
+  rtcnet:
+    driver: bridge
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
