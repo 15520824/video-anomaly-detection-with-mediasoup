@@ -4,13 +4,15 @@ services:
     container_name: mediasoup-server
     env_file: .env
     ports:
-      - "3000:3000"
-      - "3100:3100" # ingest HTTP
+      - "3100:3100" # HTTP/API/Socket.IO nếu có
+      - "40000-40020:40000-40020/udp" # BẮT BUỘC: dải UDP cho WebRTC
     networks:
       - rtcnet
     depends_on:
       - turn
     restart: unless-stopped
+    environment:
+      - MEDIASOUP_ANNOUNCED_IP=192.168.1.29 # IP LAN của host
 
   turn:
     image: instrumentisto/coturn:latest
@@ -52,10 +54,10 @@ services:
     restart: unless-stopped
 
   web:
-    image: nginx:alpine
+    build:
+      context: ./web
+      dockerfile: Dockerfile
     container_name: web
-    volumes:
-      - ./web/dist:/usr/share/nginx/html:ro
     ports:
       - "8080:80"
     networks:
@@ -89,6 +91,7 @@ services:
     restart: unless-stopped
     ports:
       - "8554:8554" # RTSP
+      - "9997:9997" # API
     networks:
       - rtcnet
     volumes:

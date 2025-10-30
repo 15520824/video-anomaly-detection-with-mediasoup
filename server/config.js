@@ -2,7 +2,7 @@ export default {
   listenIp: process.env.MEDIASOUP_LISTEN_IP || "0.0.0.0",
   announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP, // public IP
   minPort: parseInt(process.env.MEDIASOUP_MIN_PORT || "40000"),
-  maxPort: parseInt(process.env.MEDIASOUP_MAX_PORT || "49999"),
+  maxPort: parseInt(process.env.MEDIASOUP_MAX_PORT || "40020"),
   webPort: parseInt(process.env.PORT || "3000"),
   rtc: {
     // codec mặc định phổ biến trên trình duyệt

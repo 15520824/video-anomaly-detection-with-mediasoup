@@ -1,3 +1,19 @@
-rtspAddress: :8554
+rtsp: yes
+rtspAddress: 0.0.0.0:8554
 api: yes
 apiAddress: 0.0.0.0:9997
+
+# Đảm bảo authMethod không ép API phải auth
+authMethod: internal
+
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api # Cho phép API
+      - action: metrics # Cho phép metrics
+      - action: pprof # nếu dùng

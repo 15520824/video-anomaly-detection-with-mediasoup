@@ -9,7 +9,13 @@ BOT_ID = os.getenv("AI_BOT_ID", "analyzer-bot")
 
 
 sio = socketio.AsyncClient()
-pc = RTCPeerConnection()
+pc = RTCPeerConnection({
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}],
+    "iceTransportPolicy": "all",
+    "bundlePolicy": "max-bundle",
+    "rtcpMuxPolicy": "require",
+    "icecandidatePoolSize": 0
+})
 blackhole = MediaBlackhole()
 
 

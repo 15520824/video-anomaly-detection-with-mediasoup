@@ -1,34 +1,48 @@
 {  # global options
   email {$EMAIL}
+  # debug
 }
 
 {$DOMAIN} {
   encode zstd gzip
+  tls internal
 
   header {
     Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
   }
 
-  # API & Socket.IO → server:3000 (Caddy tự xử lý WebSocket)
+  # 1) /ingest/* → server:3100
+  @ingest path /ingest/*
+  handle @ingest {
+    reverse_proxy server:3100
+  }
+
+  # 2) /api, /socket.io, /metrics → server:3000
   @api path /socket.io* /api* /metrics*
   handle @api {
     reverse_proxy server:3000 {
       transport http {
         keepalive 5s
       }
-      header_up Host {host}
-      header_up X-Forwarded-For {remote}
-      header_up X-Forwarded-Proto {scheme}
     }
   }
 
-  # Mặc định: web tĩnh → web:80
-  handle {
+  # 3) SPA fallback cho FE routes:
+  #   - KHÔNG phải API/ingest
+  #   - KHÔNG phải URL có phần mở rộng (.js .css .png ...)
+  @hasExt path_regexp hasext ^/[^?]*\.[A-Za-z0-9]+$
+  @spa {
+    not path /api* /socket.io* /metrics* /ingest*
+    not path_regexp hasext ^/[^?]*\.[A-Za-z0-9]+$
+  }
+  # Quan trọng: rewrite trước khi proxy
+  handle @spa {
+    rewrite * /index.html
     reverse_proxy web:80
   }
 
-  @ingest path /ingest/*
-  handle @ingest {
-    reverse_proxy host.docker.internal:3100
+  # 4) Còn lại (root + file tĩnh) → web:80
+  handle {
+    reverse_proxy web:80
   }
 }

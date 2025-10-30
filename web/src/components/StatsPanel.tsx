@@ -1,43 +1,63 @@
 // web/src/pages/CameraManager.tsx
 import React, { useEffect, useMemo, useState } from "react";
+import { socket } from "../lib/socket";
 
 type PathItem = {
   name: string;
-  // tuỳ MediaMTX API trả về, để any cho linh hoạt
+  source?: any; // MediaMTX có thể trả object {type,id}
   [k: string]: any;
 };
 
-const API_BASE = ""; // same-origin. Nếu cần: "https://your-domain"
+// const API_BASE = typeof window !== "undefined" ? window.location.origin : "";
+const API_BASE = "http://localhost:3100";
 
-const isRtsp = (s: string) => /^rtsp(s)?:\/\//i.test(s);
+const isRtsp = (s: unknown) =>
+  typeof s === "string" && /^rtsp(s)?:\/\//i.test(s);
 const niceErr = (e: unknown) =>
   e instanceof Error
     ? e.message
     : typeof e === "string"
     ? e
     : "unexpected error";
+// ép mọi thứ thành text khi render (tránh lỗi React #31)
+const toText = (v: any) =>
+  typeof v === "string" ? v : v == null ? "" : JSON.stringify(v);
+// label hiển thị gọn cho source object
+const readSourceLabel = (s: any) =>
+  typeof s === "string"
+    ? s
+    : s && typeof s === "object" && "type" in s
+    ? String(s.type)
+    : "";
 
-export default function StatsPanel() {
+export default function CameraManager() {
   const [name, setName] = useState("");
   const [rtspUrl, setRtspUrl] = useState("");
   const [onDemand, setOnDemand] = useState(true);
   const [forceTCP, setForceTCP] = useState(true);
   const [paths, setPaths] = useState<PathItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [assigning, setAssigning] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     type: "ok" | "err";
     msg: string;
   } | null>(null);
   const [filter, setFilter] = useState("");
 
+  const defaultRoomFromPath = useMemo(
+    () => window.location.pathname.split("/").filter(Boolean).pop() || "lab",
+    []
+  );
+  const [roomId, setRoomId] = useState(defaultRoomFromPath);
+
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return paths;
-    return paths.filter((p) => p.name?.toLowerCase().includes(q));
+    return paths.filter((p) => (p.name || "").toLowerCase().includes(q));
   }, [paths, filter]);
 
+  // host:8554 = RTSP do MediaMTX phục vụ
   const hostLabel = useMemo(() => {
-    // Dùng host hiện tại để gợi ý URL phát: rtsp://<host>:8554/<name>
     const h = window.location.hostname || "localhost";
     return `${h}:8554`;
   }, []);
@@ -45,8 +65,9 @@ export default function StatsPanel() {
   async function fetchPaths() {
     try {
       const r = await fetch(`${API_BASE}/ingest/cameras`);
-      const j = await r.json();
-      // MediaMTX /v3/paths/list trả {items:[{name,...}]}
+      const txt = await r.text(); // backend có thể trả 204
+      if (!r.ok) throw new Error(txt || `HTTP ${r.status}`);
+      const j = txt ? JSON.parse(txt) : {};
       const list = Array.isArray(j?.items)
         ? j.items
         : Array.isArray(j)
@@ -69,13 +90,17 @@ export default function StatsPanel() {
     e.preventDefault();
     setNotice(null);
 
-    if (!name.trim())
-      return setNotice({ type: "err", msg: "Nhập tên path (ví dụ: cam1)" });
-    if (!rtspUrl.trim() || !isRtsp(rtspUrl))
-      return setNotice({
+    if (!name.trim()) {
+      setNotice({ type: "err", msg: "Nhập tên path (ví dụ: cam1)" });
+      return;
+    }
+    if (!rtspUrl.trim() || !isRtsp(rtspUrl)) {
+      setNotice({
         type: "err",
         msg: "URL phải bắt đầu bằng rtsp:// hoặc rtsps://",
       });
+      return;
+    }
 
     setLoading(true);
     try {
@@ -89,8 +114,9 @@ export default function StatsPanel() {
           forceTCP,
         }),
       });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error || "Add failed");
+      const txt = await r.text();
+      const j = txt ? JSON.parse(txt) : {};
+      if (!r.ok) throw new Error(j?.error || txt || "Add failed");
 
       setNotice({
         type: "ok",
@@ -113,10 +139,78 @@ export default function StatsPanel() {
     );
   }
 
+  // Assign stream (MediaMTX path) vào room qua signaling → bot ingest publish WebRTC vào room
+  async function assignToRoom(p: PathItem) {
+    setNotice(null);
+    if (!roomId.trim()) {
+      setNotice({ type: "err", msg: "Nhập Room ID trước khi assign." });
+      return;
+    }
+
+    const cameraId = `cam-${p.name}`; // có thể đổi thành p.name để 1-1
+    const playUrl = `rtsp://${hostLabel}/${p.name}`; // luôn dùng RTSP do MTX phục vụ
+    const rtspToUse = playUrl;
+
+    try {
+      setAssigning(p.name);
+      await new Promise<void>((res) =>
+        socket.connected ? res() : socket.once("connect", () => res())
+      );
+
+      socket.emit("start-camera", {
+        roomId,
+        id: cameraId,
+        label: p.name, // để Viewer lọc/hiển thị
+        path: p.name, // MediaMTX path
+        rtspUrl: rtspToUse,
+      });
+
+      setNotice({
+        type: "ok",
+        msg: `Đã gửi lệnh assign "${p.name}" vào phòng "${roomId}". Mở viewer để xem.`,
+      });
+    } catch (e) {
+      setNotice({ type: "err", msg: `Assign thất bại: ${niceErr(e)}` });
+    } finally {
+      setAssigning(null);
+    }
+  }
+
   return (
     <div style={styles.container}>
       <h1 style={styles.h1}>IP Camera Manager</h1>
 
+      {/* Room selector */}
+      <div style={{ ...styles.card, ...styles.rowInline }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+          }}
+        >
+          <label style={styles.label}>Room ID</label>
+          <input
+            style={{ ...styles.input, width: 260 }}
+            placeholder="lab-123"
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value)}
+          />
+          <a
+            href={`/viewer/${encodeURIComponent(roomId)}`}
+            style={styles.btnLink}
+            title="Mở viewer cho phòng này"
+          >
+            Mở Viewer
+          </a>
+          <button type="button" onClick={fetchPaths} style={styles.btnGhost}>
+            Reload danh sách
+          </button>
+        </div>
+      </div>
+
+      {/* Khai báo path mới vào MediaMTX */}
       <form onSubmit={handleAdd} style={styles.card}>
         <div style={styles.row}>
           <label style={styles.label}>Tên path</label>
@@ -163,16 +257,12 @@ export default function StatsPanel() {
           <button type="submit" disabled={loading} style={styles.btnPrimary}>
             {loading ? "Đang thêm…" : "Thêm camera"}
           </button>
-          <button type="button" onClick={fetchPaths} style={styles.btnGhost}>
-            Reload danh sách
-          </button>
-        </div>
-
-        <div style={styles.hint}>
-          Sau khi thêm, bạn có thể xem bằng VLC:&nbsp;
-          <code>
-            rtsp://{hostLabel}/{name || "cam1"}
-          </code>
+          <div style={styles.hint}>
+            Sau khi thêm, có thể xem qua MTX:&nbsp;
+            <code>
+              rtsp://{hostLabel}/{name || "cam1"}
+            </code>
+          </div>
         </div>
 
         {notice && (
@@ -184,11 +274,12 @@ export default function StatsPanel() {
               borderColor: notice.type === "ok" ? "#b8f0c2" : "#f5bcbc",
             }}
           >
-            {notice.msg}
+            {String(notice.msg)}
           </div>
         )}
       </form>
 
+      {/* Danh sách paths + Assign vào phòng */}
       <div style={styles.card}>
         <div style={{ ...styles.row, ...styles.rowInline }}>
           <h2 style={styles.h2}>Danh sách streams</h2>
@@ -206,12 +297,21 @@ export default function StatsPanel() {
           <div style={styles.list}>
             {filtered.map((p) => {
               const playUrl = `rtsp://${hostLabel}/${p.name}`;
+              const viewUrl = `/viewer/${encodeURIComponent(
+                roomId
+              )}?cams=${encodeURIComponent(p.name)}`;
               return (
                 <div key={p.name} style={styles.item}>
                   <div style={{ flex: 1 }}>
                     <div style={styles.itemTitle}>{p.name}</div>
                     <div style={styles.itemSub}>
-                      RTSP: <code>{playUrl}</code>
+                      RTSP (MTX): <code>{playUrl}</code>
+                      {p.source ? (
+                        <>
+                          {" "}
+                          | Nguồn gốc: <code>{readSourceLabel(p.source)}</code>
+                        </>
+                      ) : null}
                     </div>
                   </div>
                   <div style={styles.actions}>
@@ -221,13 +321,19 @@ export default function StatsPanel() {
                     >
                       Copy URL
                     </button>
-                    {/* nếu bạn có route xem: /viewer/:roomId?path=name */}
-                    <a
-                      href={`/viewer/${encodeURIComponent(p.name)}`}
-                      style={styles.btnLink}
-                    >
-                      Test trong viewer
+                    <a href={viewUrl} style={styles.btnLink}>
+                      Xem trong viewer
                     </a>
+                    <button
+                      style={styles.btnPrimary}
+                      onClick={() => assignToRoom(p)}
+                      disabled={assigning === p.name || !roomId.trim()}
+                      title="Gửi lệnh start-camera tới signaling để bot ingest publish vào room"
+                    >
+                      {assigning === p.name
+                        ? "Assigning…"
+                        : "Assign vào phòng này"}
+                    </button>
                   </div>
                 </div>
               );
@@ -288,7 +394,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "10px 14px",
     borderRadius: 10,
     cursor: "pointer",
-    marginLeft: 8,
   },
   btnLink: {
     textDecoration: "none",

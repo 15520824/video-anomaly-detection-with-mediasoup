@@ -1,106 +1,254 @@
-import os, asyncio, numpy as np, socketio
-from aiortc import RTCPeerConnection, MediaStreamTrack, RTCSessionDescription
-from av import VideoFrame
-import av
+import os
+import asyncio
+import signal
+import json
+import socketio
+import aiohttp
+from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
-SIGNALING_URL   = os.getenv("SIGNALING_URL", "http://localhost:3000")
-ROOM_ID         = os.getenv("ROOM_ID", "lab")
-CAMERA_ID       = os.getenv("CAMERA_ID", "cam-01")
-RTSP_URL        = os.getenv("RTSP_URL")
-RTSP_TRANSPORT  = os.getenv("RTSP_TRANSPORT", "tcp")     # tcp|udp
-RTSP_TIMEOUT_MS = int(os.getenv("RTSP_TIMEOUT_MS", "5000"))
+# ========= Config =========
+SIGNALING_URL   = os.getenv("SIGNALING_URL", "http://mediasoup-server:3000")   # Socket.IO
+ALLOC_API       = os.getenv("ALLOC_API",   "http://mediasoup-server:3100/ingest/create")  # API xin PlainTransport
+ROOM_DEFAULT    = os.getenv("ROOM_ID", "lab")
 
-sio = socketio.AsyncClient()
-pc  = RTCPeerConnection()
+# RTSP/MediaMTX
+RTSP_TRANSPORT  = os.getenv("RTSP_TRANSPORT", "tcp")  # "tcp" | "udp"
+FFMPEG_BIN      = os.getenv("FFMPEG_BIN", "ffmpeg")
+MTX_HOST        = os.getenv("MTX_HOST", "mediamtx")   # service name của MediaMTX (RTSP)
+MTX_PORT        = int(os.getenv("MTX_PORT", "8554"))
 
-class RTSPVideoTrack(MediaStreamTrack):
-    kind = "video"
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-        self.container = None
-        self.stream = None
+# H264 -> RTP (copy nếu có thể; nếu camera không tương thích thì chuyển sang baseline)
+PREFER_COPY     = os.getenv("PREFER_COPY", "1") == "1"
+BITRATE         = os.getenv("BITRATE", "2500k")
+GOP_SECONDS     = float(os.getenv("GOP_SECONDS", "2"))
 
-    def _open(self):
-        self.container = av.open(
-            self.url,
-            options={
-                "rtsp_transport": RTSP_TRANSPORT,
-                "stimeout": str(RTSP_TIMEOUT_MS * 1000),
-                "rw_timeout": str(RTSP_TIMEOUT_MS * 1000),
-            }
-        )
-        self.stream = next(s for s in self.container.streams if s.type == "video")
-        self.stream.thread_type = "AUTO"
+# Ingest (PlainRTP → mediasoup)
+INGEST_HOST     = os.getenv("INGEST_HOST", "mediasoup-server")  # hostname đích RTP nếu API trả loopback
 
-    async def recv(self):
-        if self.container is None:
-            self._open()
-        for _ in range(3):
-            try:
-                frame = next(self.container.decode(self.stream))
-                if frame.format.name != "rgb24":
-                    frame = frame.reformat(format="rgb24")
-                return frame
-            except StopIteration:
-                await asyncio.sleep(0.02)
-            except Exception:
+# ========= Globals =========
+sio = socketio.AsyncClient(reconnection=True, reconnection_attempts=0, reconnection_delay=1)
+
+ff_task: Optional[asyncio.Task] = None
+generation = 0
+current = {"roomId": None, "id": None, "label": None, "path": None, "rtspUrl": None}
+running = True
+
+# ====== Helpers ======
+def normalize_rtsp(url: str) -> str:
+    """
+    - Cắt dấu '.'/' '/'; 
+    - Nếu host là localhost/127.0.0.1/::1 → đổi sang MTX_HOST:MTX_PORT.
+    - Giữ nguyên user:pass nếu có.
+    """
+    s = (url or "").strip()
+    while s and s[-1] in ".; ":
+        s = s[:-1]
+    try:
+        u = urlparse(s)
+        if u.scheme.lower() != "rtsp":
+            return s
+        host = (u.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", "::1"):
+            auth = ""
+            if u.username:
+                auth = u.username + (f":{u.password}" if u.password else "")
+            netloc = f"{MTX_HOST}:{MTX_PORT}"
+            if auth:
+                netloc = f"{auth}@{netloc}"
+            s = urlunparse((u.scheme, netloc, u.path or "", u.params, u.query, u.fragment))
+        return s
+    except Exception:
+        return s
+
+async def http_post_json(url: str, payload: dict, retries: int = 3, delay: float = 0.8) -> dict:
+    last = None
+    for _ in range(retries):
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    txt = await resp.text()
+                    if resp.status >= 400:
+                        raise RuntimeError(f"POST {url} -> {resp.status}: {txt[:200]}")
+                    return json.loads(txt or "{}")
+        except Exception as e:
+            last = e
+            await asyncio.sleep(delay)
+    raise last
+
+def build_ffmpeg_args(rtsp_url: str, ip: str, rtp_port: int, copy: bool, payload_size: int = 1200):
+    common_in = [
+        FFMPEG_BIN, "-loglevel", "warning",
+        "-rtsp_transport", RTSP_TRANSPORT,
+        "-i", rtsp_url,
+        "-an",
+    ]
+    if copy:
+        video_chain = [
+            "-c:v", "copy",
+            "-f", "rtp",
+            f"rtp://{ip}:{rtp_port}?pkt_size={payload_size}",
+        ]
+    else:
+        gop = max(1, int(30 * GOP_SECONDS))  # approx 30fps
+        video_chain = [
+            "-c:v", "libx264", "-profile:v", "baseline", "-tune", "zerolatency",
+            "-x264-params", f"keyint={gop}:scenecut=0",
+            "-b:v", BITRATE, "-maxrate", BITRATE, "-bufsize", str(int(2*float(BITRATE.rstrip('k')))) + "k",
+            "-pix_fmt", "yuv420p",
+            "-f", "rtp",
+            f"rtp://{ip}:{rtp_port}?pkt_size={payload_size}",
+        ]
+    return common_in + video_chain
+
+async def spawn_ffmpeg(args):
+    return await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+async def ffmpeg_pump(proc: asyncio.subprocess.Process, tag: str):
+    try:
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            print(f"[ffmpeg:{tag}] {line.decode(errors='ignore').rstrip()}")
+    except asyncio.CancelledError:
+        pass
+
+async def start_publish(room_id: str, cam_id: str, label: str, path: str, rtsp_url: str):
+    """
+    1) Gọi /ingest/create xin PlainTransport (server nên dùng comedia+rtcpMux)
+    2) Spawn ffmpeg đẩy RTP → mediasoup
+    3) Auto-restart nếu ffmpeg chết (cùng thế hệ)
+    """
+    global ff_task, generation, PREFER_COPY
+    tag = cam_id or "cam"
+    my_gen = generation
+
+    # 1) Allocate ports
+    alloc = await http_post_json(ALLOC_API, {"roomId": room_id})
+    rtp_port = int(alloc["rtpPort"])
+    ip_from_api = (alloc.get("ip") or "").strip()
+    ip = INGEST_HOST if ip_from_api in ("", "127.0.0.1", "::1", "localhost") else ip_from_api
+
+    # 2) Spawn ffmpeg
+    args = build_ffmpeg_args(rtsp_url, ip, rtp_port, copy=PREFER_COPY)
+    print(f"[publisher] spawn ffmpeg → {ip}:{rtp_port}  copy={PREFER_COPY}  room={room_id} id={cam_id}")
+    proc = await spawn_ffmpeg(args)
+
+    async def _runner():
+        nonlocal proc
+        global PREFER_COPY
+        try:
+            await ffmpeg_pump(proc, tag)
+            ret = await proc.wait()
+            print(f"[publisher] ffmpeg exit code={ret}")
+            # Auto-restart nếu vẫn là camera hiện tại & cùng thế hệ
+            if running and my_gen == generation and current.get("id") == cam_id:
+                await asyncio.sleep(1.0)
+                print("[publisher] restarting ffmpeg…")
+                if PREFER_COPY:
+                    PREFER_COPY = False
+                    print("[publisher] fallback to transcode (baseline)")
                 try:
-                    if self.container:
-                        self.container.close()
-                finally:
-                    self.container = None
-                    await asyncio.sleep(1)
-                    self._open()
-        # fallback: frame đen
-        import numpy as np
-        black = np.zeros((480, 640, 3), dtype=np.uint8)
-        return VideoFrame.from_ndarray(black, format="rgb24")
+                    await start_publish(room_id, cam_id, label, path, rtsp_url)
+                except Exception as e:
+                    print(f"[publisher] restart failed: {e}")
+        except asyncio.CancelledError:
+            try:
+                if proc.returncode is None:
+                    proc.send_signal(signal.SIGTERM)
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[publisher] _runner error: {e}")
 
-# ----- Socket.IO signaling -----
+    ff_task = asyncio.create_task(_runner())
 
+async def stop_publish():
+    global ff_task, generation
+    if ff_task and not ff_task.cancelled():
+        print("[publisher] stopping current ffmpeg…")
+        generation += 1  # chặn auto-restart của runner cũ
+        ff_task.cancel()
+        try:
+            await ff_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[publisher] stop_publish swallowed error: {e}")
+        ff_task = None
+
+# ====== Socket.IO events ======
 @sio.event
 async def connect():
-    print("[publisher] connected to signaling")
-    await sio.emit("join", {"roomId": ROOM_ID, "role": "publisher", "id": CAMERA_ID})
-    await start_webrtc()
+    print("[publisher] connected to signaling; waiting for start-camera …")
+    await sio.emit("join", {"roomId": "_ingest_", "role": "publisher-bot", "id": "rtsp-publisher"})
 
-async def start_webrtc():
-    # add RTSP video
-    track = RTSPVideoTrack(RTSP_URL)
-    pc.addTrack(track)
+@sio.on("start-camera")
+async def on_start_camera(payload):
+    """
+    UI/server gửi: { roomId, id, label, path, rtspUrl }
+    """
+    room_id = payload.get("roomId") or ROOM_DEFAULT
+    cam_id  = payload.get("id") or payload.get("cameraId") or "cam-auto"
+    label   = payload.get("label")
+    path    = payload.get("path")
+    rtsp    = normalize_rtsp(payload.get("rtspUrl"))
 
-    # optional: prefer UDP ICE; khi cần TURN, server nên trả ICE phù hợp
-    @pc.on("iceconnectionstatechange")
-    async def on_state_change():
-        print("[publisher] ICE:", pc.iceConnectionState)
+    if not rtsp:
+        print("[publisher] ⚠️ start-camera thiếu rtspUrl")
+        return
 
-    offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
+    current.update(roomId=room_id, id=cam_id, label=label, path=path, rtspUrl=rtsp)
+    await stop_publish()
+    print(f"🟢 start-camera room={room_id} id={cam_id} label={label} path={path} url={rtsp}")
+    try:
+        await start_publish(room_id, cam_id, label, path, rtsp)
+    except Exception as e:
+        print(f"[publisher] start_publish failed: {e}")
 
-    # gửi SDP offer lên server -> chờ SDP answer
-    fut = asyncio.get_event_loop().create_future()
+@sio.on("stop-camera")
+async def on_stop_camera(payload):
+    target_id = payload.get("id") or payload.get("cameraId")
+    if target_id is None or target_id == current.get("id"):
+        print(f"🔴 stop-camera id={current.get('id')}")
+        await stop_publish()
+        current.update(roomId=None, id=None, label=None, path=None, rtspUrl=None)
 
-    @sio.on("bot-answer")
-    async def on_bot_answer(payload):
-        if payload.get("roomId") == ROOM_ID and payload.get("id") == CAMERA_ID:
-            if not fut.done():
-                fut.set_result(payload["sdp"])
+async def heartbeat_task():
+    while True:
+        try:
+            await sio.emit("publisher-keepalive", {"roomId": ROOM_DEFAULT, "id": "rtsp-publisher"})
+        except Exception:
+            pass
+        await asyncio.sleep(10)
 
-    await sio.emit("bot-offer", {
-        "roomId": ROOM_ID,
-        "id": CAMERA_ID,
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type
-    })
-
-    answer_sdp = await fut
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer_sdp, type="answer"))
-    print("[publisher] set remote answer OK")
-
+# ====== Main ======
 async def main():
     await sio.connect(SIGNALING_URL)
+    asyncio.create_task(heartbeat_task())
     await sio.wait()
 
+def _shutdown():
+    global running
+    running = False
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _shutdown)
+        except NotImplementedError:
+            pass
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.run_until_complete(stop_publish())
