@@ -1,6 +1,7 @@
+import { once } from "node:events";
+import express from "express";
 import { Server } from "socket.io";
 import { createWorker, createWebRtcTransport } from "./mediasoup.js";
-import express from "express";
 
 /**
  * Goals of this revision:
@@ -110,6 +111,41 @@ export async function attachSignaling(httpServer) {
       });
     }
     return rooms.get(roomId);
+  }
+
+  function cleanupPeer(room, socketId) {
+    const peer = room.peers.get(socketId);
+    if (!peer) return;
+
+    peer.consumers?.forEach((consumer) => {
+      if (!consumer.closed) {
+        try {
+          consumer.close();
+        } catch {}
+      }
+    });
+
+    peer.producers?.forEach((producer) => {
+      if (!producer.closed) {
+        try {
+          producer.close();
+        } catch {}
+      }
+    });
+
+    peer.transports?.forEach((transport) => {
+      if (!transport.closed) {
+        try {
+          transport.close();
+        } catch {}
+      }
+    });
+
+    if (peer.publisherId) {
+      room.publishers.delete(peer.publisherId);
+    }
+
+    room.peers.delete(socketId);
   }
 
   // Helper: extract client meta (signal source, referer-derived room)
@@ -250,6 +286,8 @@ export async function attachSignaling(httpServer) {
       const room = ensureRoom(roomId);
       socket.data.signal = meta.signal;
       socket.data.role = role;
+      const publisherId =
+        role === "publisher" || role === "publisher-bot" ? id : null;
 
       room.peers.set(socket.id, {
         role,
@@ -257,6 +295,7 @@ export async function attachSignaling(httpServer) {
         producers: [],
         consumers: [],
         signal: meta.signal,
+        publisherId,
       });
       socket.join(roomId);
       socket.emit("router-rtp-capabilities", room.router.rtpCapabilities);
@@ -402,7 +441,7 @@ export async function attachSignaling(httpServer) {
     });
 
     socket.on("disconnect", () => {
-      rooms.forEach(({ peers }) => peers.delete(socket.id));
+      rooms.forEach((room) => cleanupPeer(room, socket.id));
     });
   });
 }
