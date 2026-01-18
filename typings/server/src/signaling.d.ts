@@ -92,7 +92,7 @@ export async function attachSignaling(httpServer) {
       rooms: [...rooms.keys()],
       producers: [...rooms.entries()].reduce(
         (acc, [roomId, r]) => ({ ...acc, [roomId]: r.producers.size }),
-        {}
+        {},
       ),
     });
   });
@@ -129,9 +129,9 @@ export async function attachSignaling(httpServer) {
             sourceOnDemand: !!onDemand,
             ...(forceTCP ? { sourceProtocol: "tcp" } : {}),
           }),
-        }
+        },
       );
       const txt = await r.text();
       declare interface dataType {
-	setInterval(const: any, now: any, now: any, rooms: any, forEach: any, room: any, room: any, publishers: any, forEach: any, ts: any, id: any, if: any, now: any, ts: any, PUBLISHER_TTL_MS: any, room: any, publishers: any, delete: any, id: any, 10_000: any, unref: any, Socket: any, IO: any, io: any, on: any, connection: any, socket: any, const: any, meta: any, socket: any, safeSocket: any, socket: any, join: any, async: any, payload: any, cb: any, let: any, roomId: any, role: any, id: any, payload: any, roomId: any, meta: any, roomFromReferer: any, DEFAULT_ROOM: any, role: any, meta: any, roleHint: any, viewer: any, const: any, room: any, roomId: any, socket: any, data: any, signal: any, signal: any, socket: any, data: any, role: any, HEAD: any, const: any, publisherId: any, publisher: any, role: any, publisher: any, bot: any, id: any, null: any, cebacc80606cc3d7dc79911bd02455243f628b22: any, room: any, peers: any, set: any, socket: any, id: any, role: any, transports: any, producers: any, consumers: any, signal: any, meta: any, signal: any, publisherId: any, socket: any, join: any, roomId: any, socket: any, emit: any, router: any, rtp: any, capabilities: any, room: any, router: any, rtpCapabilities: any, if: any, role: any, publisher: any, role: any, publisher: any, bot: any, id: any): {	} | null;
+	setInterval(const: any, now: any, now: any, rooms: any, forEach: any, room: any, room: any, publishers: any, forEach: any, ts: any, id: any, if: any, now: any, ts: any, PUBLISHER_TTL_MS: any, room: any, publishers: any, delete: any, id: any, 10_000: any, unref: any, Socket: any, IO: any, io: any, on: any, connection: any, socket: any, const: any, meta: any, socket: any, safeSocket: any, socket: any, join: any, async: any, payload: any, cb: any, let: any, roomId: any, role: any, id: any, payload: any, roomId: any, meta: any, roomFromReferer: any, DEFAULT_ROOM: any, role: any, meta: any, roleHint: any, viewer: any, const: any, room: any, roomId: any, socket: any, data: any, signal: any, signal: any, socket: any, data: any, role: any, const: any, publisherId: any, publisher: any, role: any, publisher: any, bot: any, id: any, null: any, room: any, peers: any, set: any, socket: any, id: any, role: any, transports: any, producers: any, consumers: any, signal: any, meta: any, signal: any, publisherId: any, socket: any, join: any, roomId: any, socket: any, emit: any, router: any, rtp: any, capabilities: any, room: any, router: any, rtpCapabilities: any, if: any, role: any, publisher: any, role: any, publisher: any, bot: any, id: any): {	} | null;
 }

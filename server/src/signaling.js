@@ -2,11 +2,6 @@ import { once } from "node:events";
 import express from "express";
 import { Server } from "socket.io";
 import { createWorker, createWebRtcTransport } from "./mediasoup.js";
-<<<<<<< HEAD
-import express from "express";
-import { once } from "events";
-=======
->>>>>>> cebacc80606cc3d7dc79911bd02455243f628b22
 
 /**
  * signaling.js (enhanced)
@@ -101,7 +96,7 @@ export async function attachSignaling(httpServer) {
       rooms: [...rooms.keys()],
       producers: [...rooms.entries()].reduce(
         (acc, [roomId, r]) => ({ ...acc, [roomId]: r.producers.size }),
-        {}
+        {},
       ),
     });
   });
@@ -138,7 +133,7 @@ export async function attachSignaling(httpServer) {
             sourceOnDemand: !!onDemand,
             ...(forceTCP ? { sourceProtocol: "tcp" } : {}),
           }),
-        }
+        },
       );
       const txt = await r.text();
       let data = {};
@@ -163,7 +158,7 @@ export async function attachSignaling(httpServer) {
       const ct = r.headers.get("content-type") || "";
       if (!r.ok)
         throw new Error(
-          `HTTP ${r.status} ${r.statusText}: ${txt.slice(0, 200)}`
+          `HTTP ${r.status} ${r.statusText}: ${txt.slice(0, 200)}`,
         );
       if (!txt.trim()) return res.json({ items: [] });
       if (!/application\/json/i.test(ct) && !/^\s*[{[]/.test(txt))
@@ -174,81 +169,6 @@ export async function attachSignaling(httpServer) {
     }
   });
 
-<<<<<<< HEAD
-=======
-  // Helper: ensure room
-  function ensureRoom(roomId) {
-    if (!rooms.has(roomId)) {
-      rooms.set(roomId, {
-        router,
-        peers: new Map(),
-        producers: new Map(), // producerId -> { producer, meta: {label,path,kind,ownerSocketId?} }
-        publishers: new Map(), // publisherId -> lastSeen ms
-      });
-    }
-    return rooms.get(roomId);
-  }
-
-  function cleanupPeer(room, socketId) {
-    const peer = room.peers.get(socketId);
-    if (!peer) return;
-
-    peer.consumers?.forEach((consumer) => {
-      if (!consumer.closed) {
-        try {
-          consumer.close();
-        } catch {}
-      }
-    });
-
-    peer.producers?.forEach((producer) => {
-      if (!producer.closed) {
-        try {
-          producer.close();
-        } catch {}
-      }
-    });
-
-    peer.transports?.forEach((transport) => {
-      if (!transport.closed) {
-        try {
-          transport.close();
-        } catch {}
-      }
-    });
-
-    if (peer.publisherId) {
-      room.publishers.delete(peer.publisherId);
-    }
-
-    room.peers.delete(socketId);
-  }
-
-  // Helper: extract client meta (signal source, referer-derived room)
-  function clientMeta(socket) {
-    const auth = socket.handshake.auth || {};
-    const q = socket.handshake.query || {};
-    const headers = socket.handshake.headers || {};
-    const signalHdr = headers["x-signal-source"];
-    let roomFromReferer = null;
-    try {
-      const ref = headers.referer;
-      if (ref) {
-        const u = new URL(ref);
-        const segs = u.pathname.split("/").filter(Boolean);
-        roomFromReferer = segs[segs.length - 1] || null;
-      }
-    } catch {}
-    return {
-      roleHint: auth.role || q.role,
-      signal: auth.signal || q.signal || signalHdr || "unknown",
-      roomFromReferer,
-    };
-  }
-
-  // POST /ingest/create → create PlainTransport + Producer(H264) (for ffmpeg/MediaMTX -> RTP ingest)
-  // body: { roomId: "lab", ssrc?: number, payloadType?: number }
->>>>>>> cebacc80606cc3d7dc79911bd02455243f628b22
   ingestApp.post("/ingest/create", async (req, res) => {
     try {
       const roomId = req.body?.roomId || DEFAULT_ROOM;
@@ -258,13 +178,13 @@ export async function attachSignaling(httpServer) {
 
       // 1. Tự động tìm codec H264 trong cấu hình mediaCodecs CỦA ROUTER
       const h264Codec = mediaCodecs.find(
-        (c) => c.kind === "video" && c.mimeType.toLowerCase() === "video/h264"
+        (c) => c.kind === "video" && c.mimeType.toLowerCase() === "video/h264",
       );
 
       // 2. Nếu không tìm thấy (lỗi cấu hình), báo lỗi rõ ràng
       if (!h264Codec) {
         throw new Error(
-          "Router không được cấu hình để hỗ trợ video/H264. Vui lòng kiểm tra file config.js"
+          "Router không được cấu hình để hỗ trợ video/H264. Vui lòng kiểm tra file config.js",
         );
       }
 
@@ -379,12 +299,9 @@ export async function attachSignaling(httpServer) {
 
       socket.data.signal = meta.signal;
       socket.data.role = role;
-<<<<<<< HEAD
-=======
       const publisherId =
         role === "publisher" || role === "publisher-bot" ? id : null;
 
->>>>>>> cebacc80606cc3d7dc79911bd02455243f628b22
       room.peers.set(socket.id, {
         role,
         transports: [],
@@ -427,7 +344,7 @@ export async function attachSignaling(httpServer) {
         });
         transport.on("close", () => {
           peer.transports = peer.transports.filter(
-            (t) => t.id !== transport.id
+            (t) => t.id !== transport.id,
           );
         });
         cb?.({
@@ -437,7 +354,7 @@ export async function attachSignaling(httpServer) {
           dtlsParameters: transport.dtlsParameters,
           direction,
         });
-      }
+      },
     );
 
     safeSocket(
@@ -451,7 +368,7 @@ export async function attachSignaling(httpServer) {
         if (!transport) return cb?.({ error: "transport not found" });
         await transport.connect({ dtlsParameters });
         cb?.({ ok: true });
-      }
+      },
     );
 
     safeSocket(
@@ -480,7 +397,7 @@ export async function attachSignaling(httpServer) {
           .to(roomId)
           .emit("new-producer", { producerId: producer.id, kind, ...meta });
         cb({ id: producer.id });
-      }
+      },
     );
 
     // List producers with metadata for UI filtering
@@ -528,7 +445,7 @@ export async function attachSignaling(httpServer) {
           kind: consumer.kind,
           rtpParameters: consumer.rtpParameters,
         });
-      }
+      },
     );
 
     socket.on("resume", async ({ consumerId }) => {
