@@ -1,7 +1,12 @@
+import { once } from "node:events";
+import express from "express";
 import { Server } from "socket.io";
 import { createWorker, createWebRtcTransport } from "./mediasoup.js";
+<<<<<<< HEAD
 import express from "express";
 import { once } from "events";
+=======
+>>>>>>> cebacc80606cc3d7dc79911bd02455243f628b22
 
 /**
  * signaling.js (enhanced)
@@ -169,6 +174,81 @@ export async function attachSignaling(httpServer) {
     }
   });
 
+<<<<<<< HEAD
+=======
+  // Helper: ensure room
+  function ensureRoom(roomId) {
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, {
+        router,
+        peers: new Map(),
+        producers: new Map(), // producerId -> { producer, meta: {label,path,kind,ownerSocketId?} }
+        publishers: new Map(), // publisherId -> lastSeen ms
+      });
+    }
+    return rooms.get(roomId);
+  }
+
+  function cleanupPeer(room, socketId) {
+    const peer = room.peers.get(socketId);
+    if (!peer) return;
+
+    peer.consumers?.forEach((consumer) => {
+      if (!consumer.closed) {
+        try {
+          consumer.close();
+        } catch {}
+      }
+    });
+
+    peer.producers?.forEach((producer) => {
+      if (!producer.closed) {
+        try {
+          producer.close();
+        } catch {}
+      }
+    });
+
+    peer.transports?.forEach((transport) => {
+      if (!transport.closed) {
+        try {
+          transport.close();
+        } catch {}
+      }
+    });
+
+    if (peer.publisherId) {
+      room.publishers.delete(peer.publisherId);
+    }
+
+    room.peers.delete(socketId);
+  }
+
+  // Helper: extract client meta (signal source, referer-derived room)
+  function clientMeta(socket) {
+    const auth = socket.handshake.auth || {};
+    const q = socket.handshake.query || {};
+    const headers = socket.handshake.headers || {};
+    const signalHdr = headers["x-signal-source"];
+    let roomFromReferer = null;
+    try {
+      const ref = headers.referer;
+      if (ref) {
+        const u = new URL(ref);
+        const segs = u.pathname.split("/").filter(Boolean);
+        roomFromReferer = segs[segs.length - 1] || null;
+      }
+    } catch {}
+    return {
+      roleHint: auth.role || q.role,
+      signal: auth.signal || q.signal || signalHdr || "unknown",
+      roomFromReferer,
+    };
+  }
+
+  // POST /ingest/create → create PlainTransport + Producer(H264) (for ffmpeg/MediaMTX -> RTP ingest)
+  // body: { roomId: "lab", ssrc?: number, payloadType?: number }
+>>>>>>> cebacc80606cc3d7dc79911bd02455243f628b22
   ingestApp.post("/ingest/create", async (req, res) => {
     try {
       const roomId = req.body?.roomId || DEFAULT_ROOM;
@@ -299,12 +379,19 @@ export async function attachSignaling(httpServer) {
 
       socket.data.signal = meta.signal;
       socket.data.role = role;
+<<<<<<< HEAD
+=======
+      const publisherId =
+        role === "publisher" || role === "publisher-bot" ? id : null;
+
+>>>>>>> cebacc80606cc3d7dc79911bd02455243f628b22
       room.peers.set(socket.id, {
         role,
         transports: [],
         producers: [],
         consumers: [],
         signal: meta.signal,
+        publisherId,
       });
       socket.join(roomId);
       socket.emit("router-rtp-capabilities", room.router.rtpCapabilities);
@@ -474,7 +561,7 @@ export async function attachSignaling(httpServer) {
     });
 
     socket.on("disconnect", () => {
-      rooms.forEach(({ peers }) => peers.delete(socket.id));
+      rooms.forEach((room) => cleanupPeer(room, socket.id));
     });
   });
 }
