@@ -19,7 +19,7 @@ MTX_HOST        = os.getenv("MTX_HOST", "mediamtx")   # service name của Media
 MTX_PORT        = int(os.getenv("MTX_PORT", "8554"))
 
 # H264 -> RTP (copy nếu có thể; nếu camera không tương thích thì chuyển sang baseline)
-PREFER_COPY     = os.getenv("PREFER_COPY", "1") == "1"
+PREFER_COPY     = False
 BITRATE         = os.getenv("BITRATE", "2500k")
 GOP_SECONDS     = float(os.getenv("GOP_SECONDS", "2"))
 
@@ -35,18 +35,21 @@ current = {"roomId": None, "id": None, "label": None, "path": None, "rtspUrl": N
 running = True
 
 # ====== Helpers ======
-def normalize_rtsp(url: str) -> str:
-    """
-    - Cắt dấu '.'/' '/'; 
-    - Nếu host là localhost/127.0.0.1/::1 → đổi sang MTX_HOST:MTX_PORT.
-    - Giữ nguyên user:pass nếu có.
+def normalize_source(url: str) -> str:
+    """Normalize input URL for either RTSP or HTTP MJPEG.
+
+    For RTSP:
+      - Trim trailing punctuation
+      - Rewrite localhost hostnames to configured MediaMTX host:port (preserve auth)
+    For other schemes (http/https), return as-is (MJPEG cameras often use plain HTTP).
     """
     s = (url or "").strip()
     while s and s[-1] in ".; ":
         s = s[:-1]
     try:
         u = urlparse(s)
-        if u.scheme.lower() != "rtsp":
+        scheme = (u.scheme or '').lower()
+        if scheme != "rtsp":
             return s
         host = (u.hostname or "").lower()
         if host in ("localhost", "127.0.0.1", "::1"):
@@ -76,28 +79,54 @@ async def http_post_json(url: str, payload: dict, retries: int = 3, delay: float
             await asyncio.sleep(delay)
     raise last
 
-def build_ffmpeg_args(rtsp_url: str, ip: str, rtp_port: int, copy: bool, payload_size: int = 1200):
-    common_in = [
-        FFMPEG_BIN, "-loglevel", "warning",
-        "-rtsp_transport", RTSP_TRANSPORT,
-        "-i", rtsp_url,
-        "-an",
-    ]
-    if copy:
+def build_ffmpeg_args(source_url: str, ip: str, rtp_port: int, rtcp_port: int, payload_type: int, copy: bool, payload_size: int = 1200):
+    """Build ffmpeg command for RTSP or HTTP MJPEG cameras.
+
+    - RTSP: optionally copy H264 to RTP, else transcode.
+    - HTTP(S) MJPEG: always transcode to H264 baseline (no copy possible).
+    """
+    u = urlparse(source_url or '')
+    scheme = (u.scheme or '').lower()
+    
+    rtp_url = f'rtp://{ip}:{rtp_port}?pkt_size={payload_size}&rtcp_port={rtcp_port}'
+
+    # Input chain differs for RTSP vs MJPEG
+    if scheme == 'rtsp':
+        common_in = [
+            FFMPEG_BIN, '-loglevel', 'warning',
+            '-rtsp_transport', RTSP_TRANSPORT,
+            '-i', source_url,
+            '-an',
+        ]
+        can_copy = copy
+    else:
+        # MJPEG HTTP stream; force demux as mjpeg if needed
+        common_in = [
+            FFMPEG_BIN, '-loglevel', 'warning',
+            '-i', source_url,
+            '-an',
+        ]
+        can_copy = False  # cannot copy MJPEG into H264 RTP
+
+    if can_copy:
         video_chain = [
-            "-c:v", "copy",
-            "-f", "rtp",
-            f"rtp://{ip}:{rtp_port}?pkt_size={payload_size}",
+            '-c:v', 'copy',
+            '-f', 'rtp',
+            '-payload_type', str(payload_type),
+            rtp_url,
         ]
     else:
         gop = max(1, int(30 * GOP_SECONDS))  # approx 30fps
         video_chain = [
-            "-c:v", "libx264", "-profile:v", "baseline", "-tune", "zerolatency",
-            "-x264-params", f"keyint={gop}:scenecut=0",
-            "-b:v", BITRATE, "-maxrate", BITRATE, "-bufsize", str(int(2*float(BITRATE.rstrip('k')))) + "k",
-            "-pix_fmt", "yuv420p",
-            "-f", "rtp",
-            f"rtp://{ip}:{rtp_port}?pkt_size={payload_size}",
+            '-c:v', 'libx264', '-profile:v', 'baseline', '-tune', 'zerolatency',
+            '-level', '3.1',
+            '-x264-params', f'keyint={gop}:scenecut=0:packetization-mode=1',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-b:v', BITRATE, '-maxrate', BITRATE, '-bufsize', str(int(2*float(BITRATE.rstrip('k')))) + 'k',
+            '-pix_fmt', 'yuv420p',
+            '-f', 'rtp',
+            '-payload_type', str(payload_type),
+            rtp_url,
         ]
     return common_in + video_chain
 
@@ -118,7 +147,7 @@ async def ffmpeg_pump(proc: asyncio.subprocess.Process, tag: str):
     except asyncio.CancelledError:
         pass
 
-async def start_publish(room_id: str, cam_id: str, label: str, path: str, rtsp_url: str):
+async def start_publish(room_id: str, cam_id: str, label: str, path: str, source_url: str):
     """
     1) Gọi /ingest/create xin PlainTransport (server nên dùng comedia+rtcpMux)
     2) Spawn ffmpeg đẩy RTP → mediasoup
@@ -129,14 +158,21 @@ async def start_publish(room_id: str, cam_id: str, label: str, path: str, rtsp_u
     my_gen = generation
 
     # 1) Allocate ports
-    alloc = await http_post_json(ALLOC_API, {"roomId": room_id})
+    alloc = await http_post_json(ALLOC_API, {
+        "roomId": room_id,
+        "label": label,
+        "path": path  
+    })
     rtp_port = int(alloc["rtpPort"])
+    rtcp_port = int(alloc["rtcpPort"])
+    payload_type = int(alloc["payloadType"])
+    
     ip_from_api = (alloc.get("ip") or "").strip()
     ip = INGEST_HOST if ip_from_api in ("", "127.0.0.1", "::1", "localhost") else ip_from_api
 
     # 2) Spawn ffmpeg
-    args = build_ffmpeg_args(rtsp_url, ip, rtp_port, copy=PREFER_COPY)
-    print(f"[publisher] spawn ffmpeg → {ip}:{rtp_port}  copy={PREFER_COPY}  room={room_id} id={cam_id}")
+    args = build_ffmpeg_args(source_url, ip, rtp_port, rtcp_port, payload_type, copy=PREFER_COPY)
+    print(f"[publisher] spawn ffmpeg → {ip}:{rtp_port}  copy={PREFER_COPY}  room={room_id} id={cam_id} src={source_url}")
     proc = await spawn_ffmpeg(args)
 
     async def _runner():
@@ -154,7 +190,7 @@ async def start_publish(room_id: str, cam_id: str, label: str, path: str, rtsp_u
                     PREFER_COPY = False
                     print("[publisher] fallback to transcode (baseline)")
                 try:
-                    await start_publish(room_id, cam_id, label, path, rtsp_url)
+                    await start_publish(room_id, cam_id, label, path, source_url)
                 except Exception as e:
                     print(f"[publisher] restart failed: {e}")
         except asyncio.CancelledError:
@@ -201,17 +237,19 @@ async def on_start_camera(payload):
     cam_id  = payload.get("id") or payload.get("cameraId") or "cam-auto"
     label   = payload.get("label")
     path    = payload.get("path")
-    rtsp    = normalize_rtsp(payload.get("rtspUrl"))
+    # Accept multiple keys for backward compatibility
+    raw_url = payload.get("rtspUrl") or payload.get("url") or payload.get("mjpegUrl")
+    source  = normalize_source(raw_url)
 
-    if not rtsp:
-        print("[publisher] ⚠️ start-camera thiếu rtspUrl")
+    if not source:
+        print("[publisher] ⚠️ start-camera thiếu source URL")
         return
 
-    current.update(roomId=room_id, id=cam_id, label=label, path=path, rtspUrl=rtsp)
+    current.update(roomId=room_id, id=cam_id, label=label, path=path, rtspUrl=source)
     await stop_publish()
-    print(f"🟢 start-camera room={room_id} id={cam_id} label={label} path={path} url={rtsp}")
+    print(f"🟢 start-camera room={room_id} id={cam_id} label={label} path={path} url={source}")
     try:
-        await start_publish(room_id, cam_id, label, path, rtsp)
+        await start_publish(room_id, cam_id, label, path, source)
     except Exception as e:
         print(f"[publisher] start_publish failed: {e}")
 

@@ -94,13 +94,6 @@ export default function CameraManager() {
       setNotice({ type: "err", msg: "Nhập tên path (ví dụ: cam1)" });
       return;
     }
-    if (!rtspUrl.trim() || !isRtsp(rtspUrl)) {
-      setNotice({
-        type: "err",
-        msg: "URL phải bắt đầu bằng rtsp:// hoặc rtsps://",
-      });
-      return;
-    }
 
     setLoading(true);
     try {

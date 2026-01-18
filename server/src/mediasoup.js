@@ -9,10 +9,13 @@ export async function createWorker() {
     logTags: ["info", "ice", "dtls", "rtp", "srtp", "rtcp"],
   });
   worker.on("died", () => process.exit(1));
+
+  const mediaCodecs = cfg.rtc.mediaCodecs;
+
   const router = await worker.createRouter({
-    mediaCodecs: cfg.rtc.mediaCodecs,
+    mediaCodecs,
   });
-  return { worker, router };
+  return { worker, router, mediaCodecs };
 }
 
 export async function createWebRtcTransport(router) {

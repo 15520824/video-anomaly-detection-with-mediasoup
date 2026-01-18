@@ -12,9 +12,10 @@ export default {
         kind: "video",
         mimeType: "video/H264",
         clockRate: 90000,
+        payloadType: 101,
         parameters: {
           "packetization-mode": 1,
-          "profile-level-id": "42e01f",
+          "profile-level-id": "42001f",
           "level-asymmetry-allowed": 1,
         },
       },
